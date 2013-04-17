@@ -18,6 +18,26 @@
 //it probably happens because by default the height of a line is smaller than the height of a combo box
 class LineHeightItemDelegate : public QItemDelegate
 {
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &option, const QModelIndex &index) const
+    {
+        if (index.column() >= 4)
+            return QItemDelegate::createEditor(parent, option, index);
+        return NULL;
+    }
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model, const QModelIndex &index) const
+    {
+        QVariant prevValue = model->data(index);
+
+        QItemDelegate::setModelData(editor, model, index);
+
+        if (prevValue != model->data(index)) {
+            QFont font = model->data(index, Qt::FontRole).value<QFont>();
+            font.setBold(true);
+            model->setData(index, font, Qt::FontRole);
+        }
+    }
+
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const
     {
         Q_UNUSED(option);
@@ -45,14 +65,17 @@ RebaseDialog::RebaseDialog(QWidget *parent) :
 
     m_ui->labelVersion->setText(m_ui->labelVersion->text().replace(QLatin1String("%1"), QLatin1String(QGRIT_VERSION)));
     QStringList headerLabels;
-    headerLabels << tr("Action") << tr("Nr") << tr("SHA-1") << tr("Description");
+    headerLabels << tr("Action") << tr("Nr") << tr("SHA-1") << tr("Description") << tr("Author") << tr("Date");
     m_ui->treeWidget->setHeaderLabels(headerLabels);
     m_ui->treeWidget->resizeColumnToContents(1);
+    m_ui->treeWidget->header()->setStretchLastSection(false);
+    m_ui->treeWidget->header()->setResizeMode(3, QHeaderView::Stretch);
     m_ui->treeWidget->setRootIsDecorated(false);
     m_ui->treeWidget->setItemDelegate(new LineHeightItemDelegate);
     m_ui->treeWidget->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ui->treeWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_ui->treeWidget->setDragDropMode(QAbstractItemView::InternalMove);
+    m_ui->treeWidget->setDropIndicatorShown(true);
     connect(m_ui->treeWidget, SIGNAL(itemSelectionChanged()), this, SLOT(slot_itemSelectionChanged()));
 
     QStyle *s = this->style();
@@ -141,25 +164,28 @@ void RebaseDialog::slot_itemIserted(const QModelIndex &parent, int start, int en
     }
 }
 
-static QString gitCommitMessage(const QString &commit, QList<QString> &filenames)
+static QString gitCommitMessage(const QString &commit, QList<QString> &filenames, QString * author, QDateTime * date)
 {
     QByteArray stdOut;
     QStringList sl;
-    //git log -1 -z --name-only --encoding=utf8 --pretty=format:%B%x01 commit_id
+    //git log -1 -z --name-only --encoding=utf8 --pretty=format:%B%x01%an<%ae>%x01%ai%x01 commit_id
 
     //headline
     //
     //log message
-    //\x01fileA\x00fileB\x00fileC\x00
+    //\x01author\x01date\x01fileA\x00fileB\x00fileC\x00
 
     //using %x00 does not work on Windows
-    sl << QLatin1String("log") << QLatin1String("-1") << QLatin1String("-z") << QLatin1String("--name-only") << QLatin1String("--encoding=utf8") << QLatin1String("--pretty=format:%B%x01") << commit;
+    sl << QLatin1String("log") << QLatin1String("-1") << QLatin1String("-z") << QLatin1String("--name-only")
+       << QLatin1String("--encoding=utf8") << QLatin1String("--pretty=format:%B%x01%an<%ae>%x01%ai%x01") << commit;
     GitTool::gitExecuteStdOutStdErr(sl, stdOut);
 
     QList<QByteArray> split = stdOut.split('\x01');
-    Q_ASSERT(split.length() == 2);
+    Q_ASSERT(split.length() == 4);
     QByteArray message = split.at(0);
-    split = split.at(1).split('\x00');
+    *author = QString::fromUtf8(split.at(1).constData());
+    *date = QDateTime::fromString(QString::fromUtf8(split.at(2).constData()), Qt::ISODate);
+    split = split.at(3).split('\x00');
     QByteArray empty = split.takeLast();
     Q_ASSERT(empty.isEmpty());
 
@@ -223,12 +249,14 @@ bool RebaseDialog::readFile(const QString &filename)
             //no description
         }
         QList<QString> filenames;
-        QString longdesc = gitCommitMessage(sha1, filenames);
+        QString author;
+        QDateTime authorDate;
+        QString longdesc = gitCommitMessage(sha1, filenames, &author, &authorDate);
 
         //reorder list to look like in gitk
         //file: top = oldest
         //tool: top = newest
-        m_list.prepend(ListEntry(action, sha1, description, longdesc, filenames));
+        m_list.prepend(ListEntry(action, sha1, description, longdesc, author, authorDate, filenames));
     }
 
     m_filename = filename;
@@ -245,11 +273,12 @@ void RebaseDialog::fillList()
     foreach(const ListEntry entry, m_list)
     {
         QStringList a;
-        a << entry.action << QString::number(i + 1) << entry.sha1 << entry.description;
+        a << entry.action << QString::number(i + 1) << entry.sha1 << entry.description << entry.author;
         QTreeWidgetItem *item = new QTreeWidgetItem(m_ui->treeWidget, a);
+        item->setData(5, Qt::EditRole, entry.date);
         //do not allow to drop other items onto this one,
         //otherwise the other element is removed, also this makes no sense...
-        item->setFlags(item->flags() & ~Qt::ItemIsDropEnabled);
+        item->setFlags((item->flags() & ~Qt::ItemIsDropEnabled) | Qt::ItemIsEditable);
         QString tooltip = entry.longdesc + QLatin1String("\n");
         for(int j = 0; j < entry.files.size(); j++)
         {
@@ -355,6 +384,21 @@ void RebaseDialog::on_pushButtonStart_clicked()
         QString sha1 = item->data(2, Qt::DisplayRole).toString();
         QString description = item->data(3, Qt::DisplayRole).toString();
         ts << QString(action + QLatin1Char(' ') + sha1 + QLatin1Char(' ') + description + QLatin1Char('\n'));
+
+        const int originalPosition = item->data(1, Qt::DisplayRole).toInt() - 1;
+        QString author = item->data(4, Qt::DisplayRole).toString();
+        QDateTime date = item->data(5, Qt::DisplayRole).toDateTime();
+        QStringList extraCommands;
+        //if (description != m_list.at(originalPosition).description && action != "pick" && action != "drop")
+        //  extraCommands << QLatin1String("--message=\"") + description.replace(QLatin1Char('"'), QLatin1String("\\\"")) + QLatin1String("\"");
+        if (author.isEmpty())
+            extraCommands << QLatin1String("--reset-author");
+        if (author != m_list.at(originalPosition).author)
+            extraCommands << QLatin1String("--author=\"") + author.replace(QLatin1Char('"'), QLatin1String("\\\"")) + QLatin1String("\"");
+        if (date != m_list.at(originalPosition).date)
+            extraCommands << QLatin1String("--date=\"") + date.toString(Qt::ISODate) + QLatin1String("\" -C HEAD"); //use '-C HEAD' to avoid requesting message
+        if (!extraCommands.isEmpty())
+            ts << QString(QLatin1String("exec git commit --amend ") + extraCommands.join(QLatin1String(" ")) + QLatin1Char('\n'));
     }
     m_acceptclose = true;
     this->close();

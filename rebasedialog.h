@@ -3,6 +3,7 @@
 
 #include <QDialog>
 #include <QModelIndex>
+#include <QDateTime>
 
 namespace Ui {
     class MainDialog;
@@ -15,10 +16,12 @@ public:
     QString sha1;
     QString description;
     QString longdesc;
+    QString author;
+    QDateTime date;
     QList<QString> files;
 
-    ListEntry(QString action, QString sha1, QString description, QString longdesc, QList<QString> files) :
-        action(action), sha1(sha1), description(description), longdesc(longdesc), files(files)
+    ListEntry(QString action, QString sha1, QString description, QString longdesc, QString author, QDateTime date, QList<QString> files) :
+        action(action), sha1(sha1), description(description), longdesc(longdesc), author(author), date(date), files(files)
     {}
 };
 
